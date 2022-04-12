@@ -631,8 +631,8 @@ processReadBatch(void *G, void *T, void *S) {
       std::string             intervalString;
       std::vector<int16_t>    leftOfShift;
       std::vector<int16_t>    rightOfShift;
-      char                    *compressedString = new char[25000];
-      char                    *finalGenotypeStr = new char[25000];
+      char                    *compressedString = new char[30000];
+      char                    *finalGenotypeStr = new char[30000];
       int16_t                countBothHaps = 0;
       bool                    isRecombinant = false;
       bool                    isGeneConv = false;
@@ -729,7 +729,7 @@ processReadBatch(void *G, void *T, void *S) {
               }
               intervalString.pop_back();
           }
-          fprintf(stdout, "Value of intervalstring2: %s\n", intervalString.c_str());
+//          fprintf(stdout, "Value of intervalstring2: %s\n", intervalString.c_str());
           if (phaseShiftCounter == 1) {
               isRecombinant = true;
           } else if (phaseShiftCounter > 1) {
