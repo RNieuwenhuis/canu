@@ -27,7 +27,8 @@
 
 #include <vector>
 #include <queue>
-
+#include <string>
+#include <stdbool.h>
 
 #define BATCH_SIZE      100
 #define IN_QUEUE_LENGTH 3
@@ -87,6 +88,12 @@ public:
     _ambiguousReads  = 0;
     _ambiguousBases  = 0;
 
+    _recombinantName   = NULL;
+    _recombinantWriter = NULL;
+    _recombinant       = NULL;
+    _recombinantReads  = 0;
+    _recombinantBases   = 0;
+
     _filteredReads   = 0;
     _filteredBases   = 0;
 
@@ -133,6 +140,12 @@ public:
   FILE                     *_ambiguous;
   uint32                    _ambiguousReads;
   uint64                    _ambiguousBases;
+
+  char                     *_recombinantName;
+  compressedFileWriter     *_recombinantWriter;
+  FILE                     *_recombinant;
+  uint32                    _recombinantReads;
+  uint64                    _recombinantBases;
 
   uint32                    _filteredReads;
   uint64                    _filteredBases;
@@ -457,6 +470,11 @@ allData::openOutputs(void) {
     _ambiguousWriter = new compressedFileWriter(_ambiguousName);
     _ambiguous       = _ambiguousWriter->file();
   }
+
+  if (_recombinantName) {
+      _recombinantWriter = new compressedFileWriter(_recombinantName);
+      _recombinant       = _recombinantWriter->file();
+  }
 }
 
 
@@ -590,73 +608,222 @@ processReadBatch(void *G, void *T, void *S) {
   uint32       nHaps   = g->_haps.size();
   uint32      *matches = new uint32 [nHaps];
 
+
   for (uint32 ii=0; ii<s->_numReads; ii++) {
 
-    //  Count the number of matching kmers for each haplotype.
-    //
-    //  The kmer iteration came from merylOp-count.C and merylOp-countSimple.C.
+      //  Count the number of matching kmers for each haplotype.
+      //
+      //  The kmer iteration came from merylOp-count.C and merylOp-countSimple.C.
 
-    for (uint32 hh=0; hh<nHaps; hh++)
-      matches[hh] = 0;
+      for (uint32 hh = 0; hh < nHaps; hh++)
+          matches[hh] = 0;
 
-    kmerIterator  kiter(s->_bases[ii].string(),
-                        s->_bases[ii].length());
+      kmerIterator kiter(s->_bases[ii].string(),
+                         s->_bases[ii].length());
+      int16 totalKmers = s->_bases[ii].length() - kiter.fmer().merSize() + 1;
 
-    while (kiter.nextMer())
-      for (uint32 hh=0; hh<nHaps; hh++)
-        if ((g->_haps[hh]->lookup->value(kiter.fmer()) > 0) ||
-            (g->_haps[hh]->lookup->value(kiter.rmer()) > 0))
-          matches[hh]++;
+      int *genotypeStr1 = new int[totalKmers];
+      int *genotypeStr2 = new int[totalKmers];
 
-    //  Find the haplotype with the most and second most matching kmers.
+      // Needed when detecting recombinants in gamete data
+      int16_t                 phaseShiftCounter = 0;
+      int16_t                 recombinantCounter = 0;
+      std::string             intervalString;
+      std::vector<int16_t>    leftOfShift;
+      std::vector<int16_t>    rightOfShift;
+      char                    *compressedString = new char[25000];
+      char                    *finalGenotypeStr = new char[25000];
+      int16_t                countBothHaps = 0;
+      bool                    isRecombinant = false;
+      bool                    isGeneConv = false;
 
-    uint32  hap1st = UINT32_MAX;   //  Index of the best haplotype.
-    double  sco1st = 0.0;          //  Score of the best haplotype.
-
-    uint32  hap2nd = UINT32_MAX;   //  Index of the second best haplotype.
-    double  sco2nd = 0.0;          //  Score of the second best haplotype.
-
-    for (uint32 hh=0; hh<nHaps; hh++) {
-      double  sco = (double)matches[hh] / g->_haps[hh]->nKmers;
-
-      if      (sco1st <= sco) {
-        hap2nd = hap1st;    sco2nd = sco1st;
-        hap1st = hh;        sco1st = sco;
+      int16 increment = 0;
+      while (kiter.nextMer()) {
+          for (uint32 hh = 0; hh < nHaps; hh++) {
+              if ((g->_haps[hh]->lookup->value(kiter.fmer()) > 0) ||
+                  (g->_haps[hh]->lookup->value(kiter.rmer()) > 0)) {
+                  matches[hh]++;
+                  // Add the hap to an array with the genotypes
+                  if (hh == 0) {
+                      genotypeStr1[increment] = hh + 1;
+                  } else if (hh == 1) {
+                      genotypeStr2[increment] = hh + 1;
+                  }
+              } else { // Or add 0 if it is either homozygous k-mer or in none of parents
+                  if (hh == 0) {
+                      genotypeStr1[increment] = 0;
+                  } else if (hh == 1) {
+                      genotypeStr2[increment] = 0;
+                  }
+              }
+          }
+          increment++;
       }
-      else if (sco2nd <= sco) {
-        hap2nd = hh;        sco2nd = sco;
+
+      if (g->_recombinantName) {
+          // Merge the arrays for both haplotypes into one
+//          char *finalGenotypeStr = new char[totalKmers + 1];
+
+          for (uint16 i = 0; i < totalKmers; i++) {
+              if ((genotypeStr1[i] == 0) && (genotypeStr2[i] == 0)) {
+                  finalGenotypeStr[i] = '-';
+              } else if ((genotypeStr1[i] == 1) && (genotypeStr2[i] == 2)) {
+                  finalGenotypeStr[i] = 'x';
+                  countBothHaps++;
+              } else if (genotypeStr1[i] == 1) {
+                  finalGenotypeStr[i] = 'a';
+              } else if (genotypeStr2[i] == 2) {
+                  finalGenotypeStr[i] = 'b';
+              }
+          }
+          finalGenotypeStr[totalKmers] = '\0';
+
+
+          // Compress the merged string
+          uint32 compressedStringLength = matches[0] + matches[1] - countBothHaps;
+//          char *compressedString = new char[compressedStringLength + 1];
+          uint32 compressedIndex = 0;
+
+          char previousPhase = '-';
+          int16_t previousPhasePos;
+          // aaaaaa------bbb--bbbbbb-bbbbbb-aaaaaaaaaaa-aaa--aaaaabbbbbbbbbbbb
+          for (int16_t i = 0; i < strlen(finalGenotypeStr); i++) {
+              if (finalGenotypeStr[i] != '-') {  // This is just for the compression, skip the homozygous positions.
+                  compressedString[compressedIndex] = finalGenotypeStr[i];
+                  compressedIndex++;
+              }
+              if (finalGenotypeStr[i] == 'a') {
+                  if ((i != 0) && (previousPhase == 'b')) {
+                      leftOfShift.push_back(previousPhasePos);
+                      rightOfShift.push_back(i);
+                  }
+                  previousPhase = 'a';
+                  previousPhasePos = i;
+              }
+              if (finalGenotypeStr[i] == 'b') {
+                  if ((i != 0) && (previousPhase == 'a')) {
+                      leftOfShift.push_back(previousPhasePos);
+                      rightOfShift.push_back(i);
+                  }
+                  previousPhase = 'b';
+                  previousPhasePos = i;
+              }
+          }
+          compressedString[compressedStringLength] = '\0';
+
+
+          assert(leftOfShift.size() == rightOfShift.size());
+          intervalString = "";
+//          fprintf(stdout, "Value of intervalstring1: %s\n", intervalString.c_str());
+//          fprintf(stdout, "Length of left shift vector: %zu\n", leftOfShift.size());
+//          fprintf(stdout, "Length of right shift vector: %zu\n", rightOfShift.size());
+          if (leftOfShift.size() > 0) {
+              for (int i = 0; i < leftOfShift.size(); i++) {
+//                  fprintf(stdout, "Left: %i\n", leftOfShift[i]);
+//                  fprintf(stdout, "Right: %i\n", rightOfShift[i]);
+                  char buffer[15];
+                  std::fill(buffer, buffer + 15, 0);
+                  snprintf(buffer, 15, "%i-%i|", leftOfShift[i], rightOfShift[i]);
+                  intervalString.append(buffer);
+                  phaseShiftCounter++;
+              }
+              intervalString.pop_back();
+          }
+          fprintf(stdout, "Value of intervalstring2: %s\n", intervalString.c_str());
+          if (phaseShiftCounter == 1) {
+              isRecombinant = true;
+          } else if (phaseShiftCounter > 1) {
+              isRecombinant = true;
+              isGeneConv = true;
+          }
       }
 
-      assert(sco2nd <= sco1st);
-    }
+      //  Find the haplotype with the most and second most matching kmers.
+      uint32 hap1st = UINT32_MAX;   //  Index of the best haplotype.
+      double sco1st = 0.0;          //  Score of the best haplotype.
+      double ratio1st = 0.0;
+      double hap1perc = 0.0;
 
-    if (0) {
-      if (((sco2nd < DBL_MIN) && (sco1st > DBL_MIN)) ||
-          ((sco2nd > DBL_MIN) && (sco1st / sco2nd > g->_minRatio)))
-        fprintf(stdout, "hap1st %1u sco1st %9.7f matches %6u   hap2 %1u sco2nd %9.7f matches %6u -> %1u\n",
-                hap1st, sco1st, matches[hap1st],
-                hap2nd, sco2nd, matches[hap2nd], hap1st);
-      else
-        fprintf(stdout, "hap1st %1u sco1st %9.7f matches %6u   hap2 %1u sco2nd %9.7f matches %6u -> AMBIGUOUS\n",
-                hap1st, sco1st, matches[hap1st],
-                hap2nd, sco2nd, matches[hap2nd]);
-    }
 
-    //  Write the read to the 'best' haplotype, unless it's an ambiguous assignment.
-    //
-    //  By default, write to the ambiguous file.
-    //
-    //  Write to the best file only if
-    //   - there is a non-zero best score and the second best is zero
-    //   - the ratio of best to second best is bigger than some threshold
+      uint32 hap2nd = UINT32_MAX;   //  Index of the second best haplotype.
+      double sco2nd = 0.0;          //  Score of the second best haplotype.
+      double ratio2nd = 0.0;
+      double hap2perc = 0.0;
 
-    s->_files[ii] = UINT32_MAX;
+      for (uint32 hh = 0; hh < nHaps; hh++) {
+          double sco = (double) matches[hh] /
+                       g->_haps[hh]->nKmers; // The number of matches divided by the total k-mer database, why?
+          double ratioMatches = (double) matches[hh] / totalKmers;
 
-    if (((sco2nd < DBL_MIN) && (sco1st > DBL_MIN)) ||
-        ((sco2nd > DBL_MIN) && (sco1st / sco2nd > g->_minRatio)))
-      s->_files[ii] = hap1st;
+          if (hh == 0) {
+              hap1perc = sco;
+              ratio1st = ratioMatches;
+          } else if (hh == 1) {
+              hap2perc = sco;
+              ratio2nd = ratioMatches;
+          }
+
+          if (sco1st <= sco) {
+              hap2nd = hap1st;
+              sco2nd = sco1st;
+              hap1st = hh;
+              sco1st = sco;
+          } else if (sco2nd <= sco) {
+              hap2nd = hh;
+              sco2nd = sco;
+          }
+
+          assert(sco2nd <= sco1st);
+      }
+
+      if (g->_recombinantName) {
+          double unassignedKmerShare = 1 - ratio1st - ratio2nd;
+
+//          fprintf(stdout, "Test\n");
+//          fprintf(stdout, "Value of intervalstring: %s\n", intervalString);
+//          fprintf(stdout, "Value of genotypestring: %s\n", finalGenotypeStr);
+//          fprintf(stdout, "Value of compressedstring: %s\n", compressedString);
+          std::string outString = "##";
+          outString.append(s->_names[ii].string()).append("\t%i\t%lf\t%lf\t%i\t%lf\t%lf\t%lf\t%d\t").append(compressedString).append("\t").append(intervalString).append("\n");
+          const char *outFmt = outString.c_str();
+
+          fprintf(stdout, outFmt, matches[0], hap1perc, ratio1st, matches[1], hap2perc, ratio2nd, unassignedKmerShare, countBothHaps);
+      }
+
+      if (0) {
+          if (((sco2nd < DBL_MIN) && (sco1st > DBL_MIN)) ||
+              ((sco2nd > DBL_MIN) && (sco1st / sco2nd > g->_minRatio)))
+              fprintf(stdout, "hap1st %1u sco1st %9.7f matches %6u   hap2 %1u sco2nd %9.7f matches %6u -> %1u\n",
+                      hap1st, sco1st, matches[hap1st],
+                      hap2nd, sco2nd, matches[hap2nd], hap1st);
+          else
+              fprintf(stdout, "hap1st %1u sco1st %9.7f matches %6u   hap2 %1u sco2nd %9.7f matches %6u -> AMBIGUOUS\n",
+                      hap1st, sco1st, matches[hap1st],
+                      hap2nd, sco2nd, matches[hap2nd]);
+      }
+
+      //  Write the read to the 'best' haplotype, unless it's an ambiguous assignment.
+      //
+      //  By default, write to the ambiguous file.
+      //
+      //  Write to the best file only if
+      //   - there is a non-zero best score and the second best is zero
+      //   - the ratio of best to second best is bigger than some threshold
+
+      s->_files[ii] = UINT32_MAX;
+
+      if ((g->_recombinantName) && (isRecombinant)) {
+          s->_files[ii] = UINT32_MAX - 1;
+      } else if (((sco2nd < DBL_MIN) && (sco1st > DBL_MIN)) ||
+                 ((sco2nd > DBL_MIN) && (sco1st / sco2nd > g->_minRatio))) {
+          s->_files[ii] = hap1st;
+      }
+      // Delete the arrays we created for the heap
+      delete[] genotypeStr1;
+      delete[] genotypeStr2;
+      delete[] finalGenotypeStr;
+      delete[] compressedString;
   }
-
   delete [] matches;
 }
 
@@ -671,11 +838,15 @@ outputReadBatch(void *G, void *S) {
     uint32 ff = s->_files[ii];
 
     if (ff == UINT32_MAX) {
-      F = g->_ambiguous;
+        F = g->_ambiguous;
 
-      g->_ambiguousReads += 1;
-      g->_ambiguousBases += s->_bases[ii].length();
+        g->_ambiguousReads += 1;
+        g->_ambiguousBases += s->_bases[ii].length();
+    } else if (ff == UINT32_MAX-1) {
+        F = g->_recombinant;
 
+        g->_recombinantReads += 1;
+        g->_recombinantBases += s->_bases[ii].length();
     } else {
       F = g->_haps[ff]->outputFile;
 
@@ -689,10 +860,6 @@ outputReadBatch(void *G, void *S) {
 
   delete s;    //  We should recycle this, but hard to do.
 }
-
-
-
-
 
 
 int
@@ -719,7 +886,10 @@ main(int argc, char **argv) {
       arg += 3;
 
     } else if (strcmp(argv[arg], "-A") == 0) {
-      G->_ambiguousName = argv[++arg];
+        G->_ambiguousName = argv[++arg];
+
+    } else if (strcmp(argv[arg], "-REC") == 0) {
+        G->_recombinantName = argv[++arg];
 
     } else if (strcmp(argv[arg], "-cr") == 0) {  //  PARAMETERS
       G->_minRatio = strtodouble(argv[++arg]);
@@ -799,7 +969,7 @@ main(int argc, char **argv) {
 
     exit(1);
   }
-
+  G->_recombinantName = "./putative_recombinants.fasta.gz";
   G->openInputs();
   G->openOutputs();
 
@@ -831,6 +1001,9 @@ main(int argc, char **argv) {
   fprintf(stdout, "--\n");
   fprintf(stdout, "-- %8u reads %12lu bases filtered for being too short.\n", G->_filteredReads, G->_filteredBases);
   fprintf(stdout, "--\n");
+  if (G->_recombinantName) {
+      fprintf(stdout, "-- %8u reads %12lu bases classified as putative recombinants.\n", G->_recombinantReads, G->_recombinantBases);
+  }
 
   delete    SS;
   delete [] TD;
