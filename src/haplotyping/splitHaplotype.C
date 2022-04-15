@@ -787,7 +787,7 @@ processReadBatch(void *G, void *T, void *S) {
           outString.append(s->_names[ii].string()).append("\t%i\t%lf\t%lf\t%i\t%lf\t%lf\t%lf\t%d\t").append(compressedString).append("\t").append(intervalString).append("\n");
           const char *outFmt = outString.c_str();
 
-          fprintf(stdout, outFmt, matches[0], hap1perc, ratio1st, matches[1], hap2perc, ratio2nd, unassignedKmerShare, countBothHaps);
+          fprintf(stdout, outFmt, matches[0], hap1perc, ratio1st, matches[1], hap2perc, ratio2nd, unassignedKmerShare, s->_bases[ii].length());
       }
 
       if (0) {
