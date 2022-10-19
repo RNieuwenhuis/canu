@@ -629,11 +629,12 @@ processReadBatch(void *G, void *T, void *S) {
       int16_t                 phaseShiftCounter = 0;
       int16_t                 recombinantCounter = 0;
       std::string             intervalString;
+      std::string             extraCompressedString;
       std::vector<int16_t>    leftOfShift;
       std::vector<int16_t>    rightOfShift;
       char                    *compressedString = new char[30000];
       char                    *finalGenotypeStr = new char[30000];
-      int16_t                countBothHaps = 0;
+      int16_t                 countBothHaps = 0;
       bool                    isRecombinant = false;
       bool                    isGeneConv = false;
 
@@ -660,15 +661,18 @@ processReadBatch(void *G, void *T, void *S) {
           increment++;
       }
 
+//      fprintf(stdout, "Genotypestring1 length: %zu\n", sizeof(genotypeStr1)/sizeof(genotypeStr1[0]));
+//      fprintf(stdout, "Genotypestring2 length: %zu\n", sizeof(genotypeStr2)/sizeof(genotypeStr2[0]));
+
       if (g->_recombinantName) {
           // Merge the arrays for both haplotypes into one
-//          char *finalGenotypeStr = new char[totalKmers + 1];
+          char *finalGenotypeStr = new char[totalKmers + 1];
 
           for (uint16 i = 0; i < totalKmers; i++) {
               if ((genotypeStr1[i] == 0) && (genotypeStr2[i] == 0)) {
                   finalGenotypeStr[i] = '-';
               } else if ((genotypeStr1[i] == 1) && (genotypeStr2[i] == 2)) {
-                  finalGenotypeStr[i] = 'x';
+                  finalGenotypeStr[i] = 'x'; // This should technically not be possible
                   countBothHaps++;
               } else if (genotypeStr1[i] == 1) {
                   finalGenotypeStr[i] = 'a';
@@ -678,20 +682,26 @@ processReadBatch(void *G, void *T, void *S) {
           }
           finalGenotypeStr[totalKmers] = '\0';
 
+//          fprintf(stdout, "finalGenotypeStr length: %zu\n", sizeof(finalGenotypeStr)/sizeof(finalGenotypeStr[0]));
 
           // Compress the merged string
           uint32 compressedStringLength = matches[0] + matches[1] - countBothHaps;
 //          char *compressedString = new char[compressedStringLength + 1];
           uint32 compressedIndex = 0;
+          uint32 phaseCount = 0;
+          extraCompressedString = "";
 
           char previousPhase = '-';
           int16_t previousPhasePos;
+
           // aaaaaa------bbb--bbbbbb-bbbbbb-aaaaaaaaaaa-aaa--aaaaabbbbbbbbbbbb
           for (int16_t i = 0; i < strlen(finalGenotypeStr); i++) {
-              if (finalGenotypeStr[i] != '-') {  // This is just for the compression, skip the homozygous positions.
+              if (finalGenotypeStr[i] != '-') {  // This is just for the compression, skip the non unique positions.
                   compressedString[compressedIndex] = finalGenotypeStr[i];
                   compressedIndex++;
               }
+
+              // This part reports the positions of shifts
               if (finalGenotypeStr[i] == 'a') {
                   if ((i != 0) && (previousPhase == 'b')) {
                       leftOfShift.push_back(previousPhasePos);
@@ -714,6 +724,7 @@ processReadBatch(void *G, void *T, void *S) {
 
           assert(leftOfShift.size() == rightOfShift.size());
           intervalString = "";
+
 //          fprintf(stdout, "Value of intervalstring1: %s\n", intervalString.c_str());
 //          fprintf(stdout, "Length of left shift vector: %zu\n", leftOfShift.size());
 //          fprintf(stdout, "Length of right shift vector: %zu\n", rightOfShift.size());
@@ -783,11 +794,13 @@ processReadBatch(void *G, void *T, void *S) {
 //          fprintf(stdout, "Value of intervalstring: %s\n", intervalString);
 //          fprintf(stdout, "Value of genotypestring: %s\n", finalGenotypeStr);
 //          fprintf(stdout, "Value of compressedstring: %s\n", compressedString);
-          std::string outString = "##";
-          outString.append(s->_names[ii].string()).append("\t%i\t%lf\t%lf\t%i\t%lf\t%lf\t%lf\t%d\t").append(compressedString).append("\t").append(intervalString).append("\n");
-          const char *outFmt = outString.c_str();
+          if (isRecombinant) {
+            std::string outString = "##";
+            outString.append(s->_names[ii].string()).append("\t%i\t%lf\t%lf\t%i\t%lf\t%lf\t%lf\t%d\t").append(compressedString).append("\t").append(intervalString).append("\t").append(finalGenotypeStr).append("\n");
+            const char *outFmt = outString.c_str();
 
-          fprintf(stdout, outFmt, matches[0], hap1perc, ratio1st, matches[1], hap2perc, ratio2nd, unassignedKmerShare, s->_bases[ii].length());
+            fprintf(stdout, outFmt, matches[0], hap1perc, ratio1st, matches[1], hap2perc, ratio2nd, unassignedKmerShare,  s->_bases[ii].length());
+          }
       }
 
       if (0) {
